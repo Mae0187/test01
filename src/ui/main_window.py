@@ -21,6 +21,15 @@ from src.logic.queue_manager import QueueManager
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        
+        # [FIX] 確保 FFmpeg 能被找到 (解決轉檔失敗問題)
+        # 將專案下的 bin 資料夾加入臨時環境變數 PATH
+        base_dir = os.getcwd()
+        bin_dir = os.path.join(base_dir, "bin")
+        if os.path.exists(bin_dir) and bin_dir not in os.environ["PATH"]:
+            os.environ["PATH"] += os.pathsep + bin_dir
+            print(f"System PATH updated: Added {bin_dir}")
+
         # 使用新版 Config 的 key (小寫)
         app_name = UI_CONFIG.get("app_name", "Yt-Dlp GUI")
         self.setWindowTitle(f"{app_name} [Batch Mode]")
@@ -33,7 +42,7 @@ class MainWindow(QMainWindow):
         self.setup_ui()
         
         # 狀態列初始化
-        self.status_label = QLabel("系統就緒")
+        self.status_label = QLabel("系統就緒 - FFmpeg 支援已啟用")
         self.status_label.setStyleSheet("font-size: 12px; color: gray;")
         self.statusBar().addWidget(self.status_label)
         
@@ -306,6 +315,20 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "網址不能為空")
             return
 
+        # [FIX] 自動補上 https:// (解決 Selenium 報錯 "invalid argument")
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+
+        # [FIX] 檢查並建立下載資料夾
+        save_path = self.path_input.text().strip()
+        if not os.path.exists(save_path):
+            try:
+                os.makedirs(save_path)
+                print(f"Created download directory: {save_path}")
+            except Exception as e:
+                QMessageBox.warning(self, "路徑錯誤", f"無法建立資料夾: {e}")
+                return
+
         # [CORE] 生成唯一 ID
         task_id = str(uuid.uuid4())
 
@@ -336,7 +359,7 @@ class MainWindow(QMainWindow):
         
         # 2. 加入後端 Queue
         config = {
-            "download_path": self.path_input.text(),
+            "download_path": save_path,
             "format": self.format_combo.currentText(),
             "custom_name": name
         }
@@ -361,10 +384,37 @@ class MainWindow(QMainWindow):
 
     def show_context_menu(self, pos):
         menu = QMenu()
+        
+        # [NEW] 停止任務選項
+        stop_action = QAction("停止任務 (保留項目)", self)
+        stop_action.triggered.connect(self.stop_selected_task)
+        menu.addAction(stop_action)
+
+        # 移除任務選項
         delete_action = QAction("移除任務", self)
         delete_action.triggered.connect(self.remove_selected_task)
         menu.addAction(delete_action)
+        
         menu.exec(self.table.mapToGlobal(pos))
+
+    # [NEW] 停止任務的邏輯
+    def stop_selected_task(self):
+        rows = sorted(set(index.row() for index in self.table.selectedIndexes()), reverse=True)
+        if not rows: return
+
+        for row in rows:
+            item = self.table.item(row, 0)
+            if item:
+                task_id = item.data(Qt.UserRole)
+                # 呼叫後端取消，但不移除 Row
+                self.queue_manager.cancel_task(task_id)
+                
+                # UI 即時反饋
+                p_bar = self.table.cellWidget(row, 2)
+                if p_bar:
+                    self.set_progress_text(p_bar, "正在停止...")
+        
+        self.status_label.setText(f"已對 {len(rows)} 個任務發出停止信號")
 
     def remove_selected_task(self):
         rows = sorted(set(index.row() for index in self.table.selectedIndexes()), reverse=True)
